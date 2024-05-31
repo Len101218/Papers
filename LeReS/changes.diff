@@ -1,0 +1,219 @@
+diff -ur lib/multi_depth_model_woauxi.py lib/multi_depth_model_woauxi.py
+--- lib/multi_depth_model_woauxi.py	2024-05-29 04:12:40.004553773 +0200
++++ lib/multi_depth_model_woauxi.py	2024-05-22 17:05:32.783477597 +0200
+@@ -15,7 +15,8 @@
+ 
+     def inference(self, rgb):
+         with torch.no_grad():
+-            input = rgb.cuda()
++            #input = rgb.cuda()
++            input = rgb.to(next(self.parameters()).device)
+             depth = self.depth_model(input)
+             pred_depth_out = depth - depth.min() + 0.01
+             return pred_depth_out
+@@ -31,4 +32,4 @@
+     def forward(self, x):
+         lateral_out = self.encoder_modules(x)
+         out_logit = self.decoder_modules(lateral_out)
+-        return out_logit
+\ No newline at end of file
++        return out_logit
+diff -ur lib/net_tools.py lib/net_tools.py
+--- lib/net_tools.py	2024-05-29 04:12:40.004553773 +0200
++++ lib/net_tools.py	2024-05-22 17:01:42.167185550 +0200
+@@ -30,15 +30,20 @@
+     """
+     if os.path.isfile(args.load_ckpt):
+         print("loading checkpoint %s" % args.load_ckpt)
+-        checkpoint = torch.load(args.load_ckpt)
++        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
++        checkpoint = torch.load(args.load_ckpt, map_location=device)
+         if shift_model is not None:
++            shift_model.to(device)
+             shift_model.load_state_dict(strip_prefix_if_present(checkpoint['shift_model'], 'module.'),
+                                     strict=True)
+         if focal_model is not None:
++            focal_model.to(device)
+             focal_model.load_state_dict(strip_prefix_if_present(checkpoint['focal_model'], 'module.'),
+                                     strict=True)
+         depth_model.load_state_dict(strip_prefix_if_present(checkpoint['depth_model'], "module."),
+                                     strict=True)
++        depth_model.to(device)
++
+         del checkpoint
+         torch.cuda.empty_cache()
+ 
+@@ -50,4 +55,4 @@
+     stripped_state_dict = OrderedDict()
+     for key, value in state_dict.items():
+         stripped_state_dict[key.replace(prefix, "")] = value
+-    return stripped_state_dict
+\ No newline at end of file
++    return stripped_state_dict
+Only in lib/: __pycache__
+diff -ur lib/spvcnn_classsification.py lib/spvcnn_classsification.py
+--- lib/spvcnn_classsification.py	2024-05-29 04:12:40.004553773 +0200
++++ lib/spvcnn_classsification.py	2024-05-24 11:43:56.789619057 +0200
+@@ -1,6 +1,6 @@
+ import torch.nn as nn
+ import torchsparse.nn as spnn
+-from torchsparse.point_tensor import PointTensor
++from torchsparse import PointTensor
+ 
+ from lib.spvcnn_utils import *
+ __all__ = ['SPVCNN_CLASSIFICATION']
+@@ -114,7 +114,8 @@
+             ResidualBlock(cs[3], cs[4], ks=3, stride=1, dilation=1),
+             ResidualBlock(cs[4], cs[4], ks=3, stride=1, dilation=1),
+         )
+-        self.avg_pool = spnn.GlobalAveragePooling()
++        #self.avg_pool = spnn.GlobalAveragePooling()
++        self.avg_pool = spnn.GlobalAvgPool()
+         self.classifier = nn.Sequential(nn.Linear(cs[4], kwargs['num_classes']))
+         self.point_transforms = nn.ModuleList([
+             nn.Sequential(
+diff -ur lib/spvcnn_utils.py lib/spvcnn_utils.py
+--- lib/spvcnn_utils.py	2024-05-29 04:12:40.004553773 +0200
++++ lib/spvcnn_utils.py	2024-05-24 12:05:38.623839297 +0200
+@@ -1,7 +1,10 @@
+ import torchsparse.nn.functional as spf
+-from torchsparse.point_tensor import PointTensor
+-from torchsparse.utils.kernel_region import *
+-from torchsparse.utils.helpers import *
++from torchsparse import SparseTensor
++import torch
++from torchsparse import PointTensor
++#from torchsparse.utils.kernel_region import *
++from torchsparse.nn.utils import *
++#from torchsparse.utils.helpers import *
+ 
+ 
+ __all__ = ['initial_voxelize', 'point_to_voxel', 'voxel_to_point']
+@@ -10,6 +13,7 @@
+ # z: PointTensor
+ # return: SparseTensor
+ def initial_voxelize(z, init_res, after_res):
++
+     new_float_coord = torch.cat(
+         [(z.C[:, :3] * init_res) / after_res, z.C[:, -1].view(-1, 1)], 1)
+ 
+@@ -24,7 +28,7 @@
+     inserted_feat = spf.spvoxelize(z.F, idx_query, counts)
+ 
+     new_tensor = SparseTensor(inserted_feat, inserted_coords, 1)
+-    new_tensor.check()
++    #new_tensor.check()
+     z.additional_features['idx_query'][1] = idx_query
+     z.additional_features['counts'][1] = counts
+     z.C = new_float_coord
+@@ -38,9 +42,11 @@
+     if z.additional_features is None or z.additional_features.get('idx_query') is None\
+        or z.additional_features['idx_query'].get(x.s) is None:
+         #pc_hash = hash_gpu(torch.floor(z.C).int())
++
++        tmp = x.s[0]
+         pc_hash = spf.sphash(
+             torch.cat([
+-                torch.floor(z.C[:, :3] / x.s).int() * x.s,
++                torch.floor(z.C[:, :3] / tmp).int() * tmp,
+                 z.C[:, -1].int().view(-1, 1)
+             ], 1))
+         sparse_hash = spf.sphash(x.C)
+@@ -54,8 +60,11 @@
+ 
+     inserted_feat = spf.spvoxelize(z.F, idx_query, counts)
+     new_tensor = SparseTensor(inserted_feat, x.C, x.s)
+-    new_tensor.coord_maps = x.coord_maps
+-    new_tensor.kernel_maps = x.kernel_maps
++    #new_tensor.coord_maps = x.coord_maps
++    #new_tensor.kernel_maps = x.kernel_maps
++    new_tensor.cmaps = x.cmaps
++    new_tensor.kmaps = x.kmaps
++
+ 
+     return new_tensor
+ 
+@@ -65,12 +74,24 @@
+ def voxel_to_point(x, z, nearest=False):
+     if z.idx_query is None or z.weights is None or z.idx_query.get(
+             x.s) is None or z.weights.get(x.s) is None:
+-        kr = KernelRegion(2, x.s, 1)
+-        off = kr.get_kernel_offset().to(z.F.device)
++        #kr = KernelRegion(2, x.s, 1)
++        #off = kr.get_kernel_offset().to(z.F.device)
++
++        # Assuming x.s is the stride and z.F.device is the device
++        size = 2  # Kernel size
++        stride = x.s  # Tensor stride
++        dilation = 1  # Dilation
++        device = z.F.device  # Device
++
++        off = get_kernel_offsets(size=size, stride=stride, dilation=dilation, device=device)
++        
++        tmp = torch.tensor(x.s, dtype=torch.float32, device=z.C.device)
++        tmp = x.s[0]
++
+         #old_hash = kernel_hash_gpu(torch.floor(z.C).int(), off)
+         old_hash = spf.sphash(
+             torch.cat([
+-                torch.floor(z.C[:, :3] / x.s).int() * x.s,
++                torch.floor(z.C[:, :3] / tmp).int() * tmp,
+                 z.C[:, -1].int().view(-1, 1)
+             ], 1), off)
+         pc_hash = spf.sphash(x.C.to(z.F.device))
+diff -ur lib/test_utils.py lib/test_utils.py
+--- lib/test_utils.py	2024-05-29 04:12:40.004553773 +0200
++++ lib/test_utils.py	2024-05-24 12:11:31.057990198 +0200
+@@ -2,7 +2,8 @@
+ import numpy as np
+ import torch
+ from torchsparse import SparseTensor
+-from torchsparse.utils import sparse_collate_fn, sparse_quantize
++from torchsparse.utils.quantize import sparse_quantize
++from torchsparse.utils.collate import sparse_collate_fn
+ from plyfile import PlyData, PlyElement
+ 
+ 
+@@ -41,10 +42,11 @@
+     feat_ = block
+ 
+     # transfer point cloud to voxels
+-    inds = sparse_quantize(pc_,
+-                           feat_,
+-                           return_index=True,
+-                           return_invs=False)
++    #_, inds = sparse_quantize(pc_,
++    #                       feat_,
++    #                       return_index=True,
++    #                       return_invs=False)
++    coords, inds = sparse_quantize(pc_, return_index=True)
+     if len(inds) > num_points:
+         inds = np.random.choice(inds, num_points, replace=False)
+ 
+@@ -71,11 +73,22 @@
+     pc_ -= pc_.min(0, keepdims=1)
+     feat_ = block
+ 
++    # Step 2: Use sparse_quantize to remove duplicates and get unique indices
++    coords, inds = sparse_quantize(pc_, return_index=True)
++    
++    # Step 3: Convert coordinates and features to tensors
++    #coords = torch.tensor(coords, dtype=torch.int32)
++    #feats = torch.tensor(block_[indices], dtype=torch.float32)
++
++    # Step 4: Create SparseTensor
++    #tensor = SparseTensor(coords=coords, feats=feats)
++
+     # transfer point cloud to voxels
+-    inds = sparse_quantize(pc_,
+-                           feat_,
+-                           return_index=True,
+-                           return_invs=False)
++    #inds = sparse_quantize(pc_,
++    #                       feat_,
++    #                       return_index=True,
++    #                       return_invs=False)
++    
+     if len(inds) > num_points:
+         inds = np.random.choice(inds, num_points, replace=False)
+ 
